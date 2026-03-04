@@ -24,19 +24,6 @@ warnings.filterwarnings("ignore")
 # Dependency check with user-friendly messages
 # ---------------------------------------------------------------------------
 
-
-def _require(package: str, install_hint: str) -> None:
-    try:
-        __import__(package)
-    except ImportError:
-        print(json.dumps({"error": f"Missing dependency: {package}. Install with: {install_hint}"}))
-        sys.exit(1)
-
-
-_require("akshare", "pip install akshare")
-_require("pandas_ta", "pip install pandas-ta")
-_require("matplotlib", "pip install matplotlib")
-
 import requests  # noqa: E402 — must precede akshare to patch Session
 
 # Spoof a browser User-Agent so eastmoney endpoints don't reject the request.
@@ -63,14 +50,47 @@ def _patched_request(
 
 requests.Session.request = _patched_request  # type: ignore[method-assign]
 
-import akshare as ak  # noqa: E402
-import matplotlib  # noqa: E402
+import akshare as ak
+import matplotlib
 
-matplotlib.use("Agg")  # headless — must come before pyplot import
-import matplotlib.dates as mdates  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
-import pandas_ta as ta  # noqa: E402,F401 — registers .ta accessor on DataFrame
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+import pandas_ta as ta
+
+# ---------------------------------------------------------------------------
+# Chinese font setup — try common CJK fonts; fall back gracefully
+# ---------------------------------------------------------------------------
+
+import matplotlib.font_manager as _fm
+
+_CJK_FONT_CANDIDATES = [
+    "SimHei",  # Windows
+    "Microsoft YaHei",
+    "WenQuanYi Micro Hei",  # Linux
+    "Noto Sans CJK SC",
+    "PingFang SC",  # macOS
+    "Heiti SC",
+    "Arial Unicode MS",
+]
+
+
+def _find_cjk_font() -> str | None:
+    available = {f.name for f in _fm.fontManager.ttflist}
+    for name in _CJK_FONT_CANDIDATES:
+        if name in available:
+            return name
+    return None
+
+
+_cjk_font = _find_cjk_font()
+if _cjk_font:
+    plt.rcParams["font.family"] = [_cjk_font, "DejaVu Sans"]
+else:
+    # Last-resort: set font.sans-serif and disable the minus-sign workaround
+    plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False  # Fix minus-sign rendering
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +126,18 @@ def resolve_symbol(symbol: str) -> tuple[str, str]:
 
 
 def fetch_kline(symbol: str, days: int) -> pd.DataFrame:
-    """Fetch daily K-line (前复权) for the past *days* calendar days."""
+    """Fetch daily K-line (前复权) for the past *days* calendar days.
+
+    We request an extra 120 calendar days (~85 trading days) of history so that
+    MA60 and Bollinger Band (20) calculations have enough warmup data even after
+    trimming to the requested display window.  The previous buffer of 60 calendar
+    days was often insufficient — A-share markets are open ~22 days/month, so 60
+    calendar days only yields ~43 trading days, which is not enough to warm up
+    MA60.
+    """
     end = datetime.today()
-    start = end - timedelta(days=days + 60)  # extra buffer for weekends/holidays
+    # 120 calendar days ≈ 85 trading days — sufficient warmup for MA60 + BB20
+    start = end - timedelta(days=days + 120)
     df = ak.stock_zh_a_hist(
         symbol=symbol,
         period="daily",
@@ -131,7 +160,7 @@ def fetch_kline(symbol: str, days: int) -> pd.DataFrame:
     )
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
-    # Trim to requested window
+    # Trim to requested display window (keep only the last `days` calendar days)
     cutoff = end - timedelta(days=days)
     df = df[df["date"] >= pd.Timestamp(cutoff)].reset_index(drop=True)
     return df
@@ -212,7 +241,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         bb_upper_col = next((c for c in bb.columns if c.startswith("BBU_")), None)
         bb_mid_col = next((c for c in bb.columns if c.startswith("BBM_")), None)
         bb_lower_col = next((c for c in bb.columns if c.startswith("BBL_")), None)
-        if bb_upper_col:
+        # Only assign if ALL three columns were found; partial assignment would
+        # leave some BB columns missing and break downstream code
+        if bb_upper_col and bb_mid_col and bb_lower_col:
             df["bb_upper"] = bb[bb_upper_col]
             df["bb_mid"] = bb[bb_mid_col]
             df["bb_lower"] = bb[bb_lower_col]
@@ -229,7 +260,15 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def find_support_resistance(df: pd.DataFrame, window: int = 10) -> dict:
-    """Identify key support and resistance levels using recent swing highs/lows."""
+    """Identify key support and resistance levels using recent swing highs/lows.
+
+    The *window* parameter is automatically clamped so that we never need more
+    data than is actually available (minimum 3 bars on each side).
+    """
+    # Adapt window to available data so we always produce some results
+    max_window = max(3, (len(df) - 1) // 2)
+    window = min(window, max_window)
+
     highs = []
     lows = []
     for i in range(window, len(df) - window):
@@ -385,12 +424,11 @@ def _trend_desc(df: pd.DataFrame) -> str:
         parts.append("价格位于所有均线上方，均线多头排列，趋势偏强")
     elif len(below) == len(valid):
         parts.append("价格位于所有均线下方，均线空头排列，趋势偏弱")
+    elif above:
+        parts.append(f"价格位于 {', '.join(above)} 上方，{', '.join(below)} 下方，趋势中性偏震荡")
     else:
-        parts.append(
-            f"价格位于 {', '.join(above)} 上方，{', '.join(below)} 下方，趋势中性偏震荡"
-            if above
-            else f"价格位于所有均线下方，{', '.join(below)} 压制明显"
-        )
+        # above is empty but not all below (shouldn't happen, but handle gracefully)
+        parts.append(f"价格受均线 {', '.join(below)} 压制，趋势偏弱")
 
     if pd.notna(last.get("macd")) and pd.notna(last.get("macd_signal")):
         if last["macd"] > last["macd_signal"]:
@@ -442,7 +480,8 @@ def _volume_desc(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     recent5_avg = df["volume"].iloc[-6:-1].mean()
     ratio = float(last["volume"]) / recent5_avg if recent5_avg > 0 else 1.0
-    pct = float(last.get("pct_change") or 0)
+    pct_raw = last.get("pct_change")
+    pct = float(pct_raw) if pd.notna(pct_raw) else 0.0
 
     if ratio > 2.0 and pct > 0:
         desc = f"今日成交量是近5日均量的 {ratio:.1f} 倍，放量上涨，买方积极，量价配合良好。"
@@ -455,7 +494,8 @@ def _volume_desc(df: pd.DataFrame) -> str:
     else:
         desc = f"今日成交量与近期均量基本持平（{ratio:.1f} 倍），量能无明显异常。"
 
-    turnover = float(last.get("turnover") or 0)
+    turnover_raw = last.get("turnover")
+    turnover = float(turnover_raw) if pd.notna(turnover_raw) else 0.0
     if turnover:
         desc += f" 换手率 {turnover:.2f}%。"
     return desc
@@ -591,7 +631,22 @@ def build_summary(
         "support_resistance": sr,
         "chart_path": chart_path,
         "recent_5d": (
-            df[["date", "open", "high", "low", "close", "volume", "pct_change", "turnover"]]
+            df[
+                [
+                    c
+                    for c in [
+                        "date",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "pct_change",
+                        "turnover",
+                    ]
+                    if c in df.columns
+                ]
+            ]
             .tail(5)
             .assign(date=lambda x: x["date"].dt.strftime("%Y-%m-%d"))
             .to_dict(orient="records")

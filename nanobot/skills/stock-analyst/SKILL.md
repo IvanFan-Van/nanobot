@@ -34,14 +34,17 @@ metadata: {"nanobot":{"emoji":"📈","requires":{"python_packages":["akshare","p
 
 ### 第三步：运行分析脚本
 
+你可以从当前 SKILL.md 的文件路径推断出 `<skill_dir>`：
+将 `SKILL.md` 的完整路径去掉文件名，即为 `<skill_dir>`。
+例如，如果 SKILL.md 位于 `/home/user/.nanobot/workspace/skills/stock-analyst/SKILL.md`，
+则 `<skill_dir>` 为 `/home/user/.nanobot/workspace/skills/stock-analyst`。
+
 ```bash
 python <skill_dir>/scripts/analyze.py \
   --symbol <股票代码或名称> \
   [--days <天数>] \
   --output-dir /tmp/stock_analysis
 ```
-
-其中 `<skill_dir>` 是本 SKILL.md 所在目录的路径。
 
 脚本会在 stdout 输出 JSON 数据，在 `--output-dir` 生成 PNG 图表。
 

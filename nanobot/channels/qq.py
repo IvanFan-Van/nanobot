@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -56,6 +56,10 @@ class QQChannel(BaseChannel):
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
+        # Per-msg_id sequence counter: QQ requires msgseq to increment for each
+        # reply to the same triggering message, otherwise the API rejects with
+        # error 40054005 ("消息被去重，请检查请求msgseq").
+        self._msg_seq: dict[str, int] = {}
 
     async def start(self) -> None:
         """Start the QQ bot."""
@@ -101,13 +105,25 @@ class QQChannel(BaseChannel):
             logger.warning("QQ client not initialized")
             return
         try:
-            msg_id = msg.metadata.get("message_id")
-            await self._client.api.post_c2c_message(
-                openid=msg.chat_id,
-                msg_type=0,
-                content=msg.content,
-                msg_id=msg_id,
-            )
+            msg_id: str = msg.metadata.get("message_id") or ""
+            # Increment per-msg_id sequence so QQ doesn't deduplicate multiple
+            # replies (progress + final) that all reference the same trigger message.
+            seq = self._msg_seq.get(msg_id, 0) + 1
+            self._msg_seq[msg_id] = seq
+            # Evict oldest entries when the dict grows too large to avoid leaking
+            # memory for high-traffic deployments (keep at most 2000 entries).
+            if len(self._msg_seq) > 2000:
+                oldest_keys = list(self._msg_seq.keys())[: len(self._msg_seq) - 2000]
+                for k in oldest_keys:
+                    del self._msg_seq[k]
+            kwargs: dict[str, Any] = {
+                "openid": msg.chat_id,
+                "msg_type": 0,
+                "content": msg.content,
+                "msg_id": msg_id,
+                "msgseq": seq,
+            }
+            await self._client.api.post_c2c_message(**kwargs)
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
 
@@ -120,7 +136,7 @@ class QQChannel(BaseChannel):
             self._processed_ids.append(data.id)
 
             author = data.author
-            user_id = str(getattr(author, 'id', None) or getattr(author, 'user_openid', 'unknown'))
+            user_id = str(getattr(author, "id", None) or getattr(author, "user_openid", "unknown"))
             content = (data.content or "").strip()
             if not content:
                 return
