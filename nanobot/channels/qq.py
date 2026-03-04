@@ -121,7 +121,7 @@ class QQChannel(BaseChannel):
                 "msg_type": 0,
                 "content": msg.content,
                 "msg_id": msg_id,
-                "msgseq": seq,
+                "msg_seq": seq,
             }
             await self._client.api.post_c2c_message(**kwargs)
         except Exception as e:
