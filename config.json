@@ -243,6 +243,7 @@
       "proxy": null,
       "search": {
         "apiKey": "",
+        "tavilyApiKey": "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",
         "maxResults": 5
       }
     },
