@@ -704,48 +704,40 @@ def _get_bridge_dir() -> Path:
     import shutil
     import subprocess
 
-    # User's bridge location
-    user_bridge = Path.home() / ".nanobot" / "bridge"
-
-    # Check if already built
-    if (user_bridge / "dist" / "index.js").exists():
-        return user_bridge
-
-    # Check for npm
-    if not shutil.which("npm"):
-        console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
-        raise typer.Exit(1)
-
-    # Find source bridge: first check package data, then source dir
-    pkg_bridge = Path(__file__).parent.parent / "bridge"  # nanobot/bridge (installed)
+    # Resolve bridge dir within the project (prefer repo root, then installed package)
     src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
+    pkg_bridge = Path(__file__).parent.parent / "bridge"         # nanobot/bridge (installed)
 
-    source = None
-    if (pkg_bridge / "package.json").exists():
-        source = pkg_bridge
-    elif (src_bridge / "package.json").exists():
-        source = src_bridge
+    bridge_dir = None
+    if (src_bridge / "package.json").exists():
+        bridge_dir = src_bridge
+    elif (pkg_bridge / "package.json").exists():
+        bridge_dir = pkg_bridge
 
-    if not source:
+    if not bridge_dir:
         console.print("[red]Bridge source not found.[/red]")
         console.print("Try reinstalling: pip install --force-reinstall nanobot")
         raise typer.Exit(1)
 
+    # Check if already built
+    if (bridge_dir / "dist" / "index.js").exists():
+        return bridge_dir
+
+    # Check for pnpm
+    if not shutil.which("pnpm"):
+        console.print("[red]pnpm not found. Please install pnpm: npm install -g pnpm[/red]")
+        raise typer.Exit(1)
+
     console.print(f"{__logo__} Setting up bridge...")
+    console.print(f"  [dim]Bridge dir: {bridge_dir}[/dim]")
 
-    # Copy to user directory
-    user_bridge.parent.mkdir(parents=True, exist_ok=True)
-    if user_bridge.exists():
-        shutil.rmtree(user_bridge)
-    shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-
-    # Install and build
+    # Install and build in-place
     try:
         console.print("  Installing dependencies...")
-        subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
+        subprocess.run(["pnpm", "install"], cwd=bridge_dir, check=True, capture_output=True, shell=True)
 
         console.print("  Building...")
-        subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
+        subprocess.run(["pnpm", "run", "build"], cwd=bridge_dir, check=True, capture_output=True, shell=True)
 
         console.print("[green]✓[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
@@ -754,7 +746,7 @@ def _get_bridge_dir() -> Path:
             console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
         raise typer.Exit(1)
 
-    return user_bridge
+    return bridge_dir
 
 
 @channels_app.command("login")
@@ -775,11 +767,11 @@ def channels_login():
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
 
     try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
+        subprocess.run(["pnpm", "start"], cwd=bridge_dir, check=True, env=env, shell=True)
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Bridge failed: {e}[/red]")
     except FileNotFoundError:
-        console.print("[red]npm not found. Please install Node.js.[/red]")
+        console.print("[red]pnpm not found. Please install pnpm: npm install -g pnpm[/red]")
 
 
 # ============================================================================
